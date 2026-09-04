@@ -1,7 +1,7 @@
 /*
   =====================================================================
   LETSENS - AIoT TOILET MONITORING SYSTEM
-  Firmware v2.1 (ESP32)
+  Firmware v2 (ESP32)
   =====================================================================
 
   Fitur yang ditambahkan pada versi ini:
@@ -16,7 +16,7 @@
   - Endpoint /resetwifi untuk menghapus kredensial WiFi & membuka
     kembali portal konfigurasi
 
-  Perubahan di v2.1:
+  Perubahan di v2:
   - Interval publish MQTT diubah dari 5 detik -> 30 detik (standar
     umum untuk data monitoring lingkungan yang non-realtime-critical)
   - Payload MQTT ditambahkan field "timestamp" (unix epoch UTC) dan
@@ -67,6 +67,38 @@
 #define DHT_TYPE DHT11
 
 #define MQ135_PIN 34
+
+// -----------------------------------------------------
+// MQ135 - PEMBAGI TEGANGAN EKSTERNAL DI JALUR AOUT
+// -----------------------------------------------------
+// Rangkaian yang dipakai:  AOUT --[R1=20k]-- GPIO34 --[R2=10k]-- GND
+// Tujuannya menurunkan tegangan AOUT (yang bisa mendekati VCC 5V modul)
+// supaya aman masuk ke ADC ESP32 (maks aman ~3.3V).
+const float MQ135_DIVIDER_R1 = 20000.0;   // ohm, dari AOUT ke GPIO34
+const float MQ135_DIVIDER_R2 = 10000.0;   // ohm, dari GPIO34 ke GND
+// Faktor pengali untuk mengembalikan tegangan AOUT asli dari tegangan yang terbaca di GPIO34
+const float MQ135_DIVIDER_FACTOR = (MQ135_DIVIDER_R1 + MQ135_DIVIDER_R2) / MQ135_DIVIDER_R2; // = 3.0
+
+const float MQ135_VCC        = 5.0;     // tegangan supply modul MQ135 (V) - cek modul, umumnya 5V
+const float ADC_VREF         = 3.3;     // tegangan referensi ADC ESP32 (V)
+const float ADC_RESOLUTION   = 4095.0;  // ESP32 ADC 12-bit (0-4095)
+
+// PENTING: RL_VALUE = resistor beban BAWAAN MODUL MQ135 (di PCB modul), BUKAN R1/R2 pembagi di atas!
+// Untuk modul MQ135 "Flying Fish" (breakout LM393 yang umum dijual), RL bawaan biasanya 1kΩ
+// (SMD resistor kecil dekat sensor, kadang tertulis kode "102" = 1kΩ). Nilai default di bawah
+// sudah sesuai untuk tipe ini. Kalau modul Anda beda merk/tipe, cek label di PCB atau ukur
+// langsung pakai multimeter (modul dalam kondisi mati/tanpa VCC) untuk hasil ppm yang akurat.
+const float MQ135_RL_VALUE = 1.0;   // dalam kOhm - default untuk modul Flying Fish MQ135
+
+// Rasio Rs/Ro standar MQ135 saat berada di udara bersih (nilai baku dari datasheet)
+const float MQ135_RO_CLEAN_AIR_FACTOR = 3.6;
+
+// Konstanta kurva regresi NH3 (amonia) MQ135: ppm = a * (Rs/Ro)^b
+// Diambil dari hasil fitting kurva grafik datasheet yang umum dipakai komunitas/tutorial —
+// bukan angka presisi pabrikan per unit. Kalibrasi ulang dengan gas NH3 konsentrasi diketahui
+// kalau butuh akurasi tinggi (misal pakai gas kalibrasi/analyzer pembanding).
+const float MQ135_NH3_CURVE_A = 102.2;
+const float MQ135_NH3_CURVE_B = -2.473;
 
 #define LED_GREEN 25
 #define LED_YELLOW 26
@@ -167,8 +199,12 @@ WebServer server(80);
 // =====================================================
 
 const float TEMP_WARNING  = 33.0;
-const float GAS_WARNING   = 1.50;
-const float GAS_CRITICAL  = 2.00;
+
+// Ambang batas amonia (NH3) dalam ppm.
+// Referensi umum: bau mulai tercium manusia sekitar ~5 ppm; batas paparan kerja 8 jam
+// (OSHA PEL time-weighted average) ada di ~25 ppm. Sesuaikan dengan kondisi lapangan Anda.
+const float GAS_WARNING_PPM   = 5.0;
+const float GAS_CRITICAL_PPM  = 25.0;
 
 
 // =====================================================
@@ -181,9 +217,12 @@ struct SensorData {
   float humidity = 0;
   bool  dhtOk = false;
 
-  // MQ135
-  int   gasRaw = 0;
-  float gasIndex = 0;
+  // MQ135 (Gas Amonia / NH3)
+  int   gasRaw = 0;       // nilai ADC mentah (0-4095) di GPIO34, SUDAH melalui pembagi tegangan
+  float gasVoltage = 0;   // tegangan asli AOUT sensor (V), setelah dikoreksi pembagi tegangan
+  float gasRs = 0;        // resistansi sensor saat ini (kOhm)
+  float gasRatio = 0;     // Rs/Ro
+  float gasPPM = 0;       // estimasi konsentrasi amonia / NH3 (ppm)
 
   // PIR (dummy)
   bool  pirPresence = false;
@@ -198,7 +237,7 @@ struct SensorData {
 
 SensorData sensorData;
 
-float gasBaseline = 0;
+float mq135_Ro = 0;   // kOhm, hasil kalibrasi baseline (Rs di udara bersih / faktor clean-air)
 
 
 // =====================================================
@@ -622,8 +661,8 @@ void publishSensorData() {
     doc["humidity_percent"] = (char*)0;   // null di JSON
   }
 
-  doc["gas_raw"]          = sensorData.gasRaw;
-  doc["gas_index"]        = round(sensorData.gasIndex * 100) / 100.0;
+  doc["gas_raw"]   = sensorData.gasRaw;
+  doc["gas_index"] = round(sensorData.gasPPM * 100) / 100.0;   // nama field tetap "gas_index" (kompatibel web), isinya tetap estimasi NH3 dalam ppm
 
   doc["pir_presence"]     = sensorData.pirPresence;
   doc["pir_duration_sec"] = sensorData.pirDurationSec;
@@ -682,13 +721,31 @@ void readDHT() {
   }
 }
 
+// Menghitung resistansi sensor (Rs) MQ135 dari pembacaan ADC mentah.
+// Sudah termasuk koreksi pembagi tegangan eksternal (R1=20k, R2=10k) di jalur AOUT->GPIO34.
+float mq135CalculateRs(int adcRaw) {
+  float vAdc = (adcRaw / ADC_RESOLUTION) * ADC_VREF;   // tegangan yang benar-benar masuk ke GPIO34
+  float vSensorOut = vAdc * MQ135_DIVIDER_FACTOR;      // tegangan AOUT asli sensor (sebelum dibagi)
+
+  if (vSensorOut < 0.001) vSensorOut = 0.001;          // hindari pembagian oleh nol
+
+  float rs = ((MQ135_VCC - vSensorOut) / vSensorOut) * MQ135_RL_VALUE;  // rumus standar Rs sensor gas
+  if (rs < 0) rs = 0;
+  return rs;   // satuan kOhm (mengikuti satuan MQ135_RL_VALUE)
+}
+
 void readMQ135() {
   sensorData.gasRaw = analogRead(MQ135_PIN);
 
-  if (gasBaseline > 0) {
-    sensorData.gasIndex = sensorData.gasRaw / gasBaseline;
+  sensorData.gasVoltage = (sensorData.gasRaw / ADC_RESOLUTION) * ADC_VREF * MQ135_DIVIDER_FACTOR;
+  sensorData.gasRs = mq135CalculateRs(sensorData.gasRaw);
+
+  if (mq135_Ro > 0) {
+    sensorData.gasRatio = sensorData.gasRs / mq135_Ro;
+    sensorData.gasPPM   = MQ135_NH3_CURVE_A * pow(sensorData.gasRatio, MQ135_NH3_CURVE_B);
   } else {
-    sensorData.gasIndex = 0;
+    sensorData.gasRatio = 0;
+    sensorData.gasPPM   = 0;
   }
 }
 
@@ -736,8 +793,8 @@ void simulateLight() {
 void updateStatusAndLED() {
 
   bool temperatureWarning = sensorData.dhtOk && (sensorData.temperature > TEMP_WARNING);
-  bool gasWarning  = sensorData.gasIndex >= GAS_WARNING;
-  bool gasCritical = sensorData.gasIndex >= GAS_CRITICAL;
+  bool gasWarning  = sensorData.gasPPM >= GAS_WARNING_PPM;
+  bool gasCritical = sensorData.gasPPM >= GAS_CRITICAL_PPM;
 
   if (!sensorData.dhtOk) {
     sensorData.status = "ERROR";
@@ -811,8 +868,8 @@ void showOLED() {
   }
 
   display.setCursor(0, 40);
-  display.print("Gas  : ");
-  display.print(sensorData.gasIndex, 2);
+  display.print("NH3: ");
+  display.print(sensorData.gasPPM, 1);
 
   display.setCursor(64, 40);
   display.print("Lux:");
@@ -844,7 +901,7 @@ void calibrateMQ135() {
   const int samples = 100;
   long total = 0;
 
-  Serial.println("Mengambil baseline MQ135...");
+  Serial.println("Mengambil baseline MQ135 (Ro) di udara bersih...");
 
   display.clearDisplay();
   display.setTextSize(1);
@@ -860,18 +917,25 @@ void calibrateMQ135() {
     delay(100);
   }
 
-  gasBaseline = (float)total / samples;
+  int avgRaw = total / samples;
+  float rsClean = mq135CalculateRs(avgRaw);
+  mq135_Ro = rsClean / MQ135_RO_CLEAN_AIR_FACTOR;
 
-  Serial.print("Baseline MQ135 = ");
-  Serial.println(gasBaseline);
+  Serial.print("Rs udara bersih = ");
+  Serial.print(rsClean, 2);
+  Serial.println(" kOhm");
+  Serial.print("Ro (baseline)   = ");
+  Serial.print(mq135_Ro, 2);
+  Serial.println(" kOhm");
 
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
   display.println("MQ135 CALIBRATION");
   display.setCursor(0, 20);
-  display.print("Baseline: ");
-  display.println(gasBaseline, 0);
+  display.print("Ro: ");
+  display.print(mq135_Ro, 2);
+  display.println(" kOhm");
   display.setCursor(0, 45);
   display.println("Done!");
   display.display();
@@ -901,10 +965,16 @@ void printSerial() {
     Serial.println("Suhu/Kelembapan: ERROR");
   }
 
-  Serial.print("MQ135 RAW  : ");
+  Serial.print("MQ135 RAW      : ");
   Serial.println(sensorData.gasRaw);
-  Serial.print("Gas Index  : ");
-  Serial.println(sensorData.gasIndex, 2);
+  Serial.print("MQ135 Voltage  : ");
+  Serial.print(sensorData.gasVoltage, 3);
+  Serial.println(" V");
+  Serial.print("MQ135 Rs/Ro    : ");
+  Serial.println(sensorData.gasRatio, 3);
+  Serial.print("Gas NH3        : ");
+  Serial.print(sensorData.gasPPM, 2);
+  Serial.println(" ppm");
 
   Serial.print("PIR        : ");
   Serial.print(sensorData.pirPresence ? "ADA ORANG" : "KOSONG");
@@ -948,7 +1018,7 @@ void setupWebServer() {
 }
 
 void handleData() {
-  StaticJsonDocument<576> doc;
+  StaticJsonDocument<640> doc;
 
   doc["device_id"]  = mqttClientId;
   doc["time"]        = getFormattedTime();
@@ -961,9 +1031,10 @@ void handleData() {
   doc["temperature_c"]  = sensorData.temperature;
   doc["humidity_pct"]   = sensorData.humidity;
 
-  doc["gas_raw"]     = sensorData.gasRaw;
-  doc["gas_baseline"] = gasBaseline;
-  doc["gas_index"]   = sensorData.gasIndex;
+  doc["gas_raw"]   = sensorData.gasRaw;
+  doc["gas_ro"]    = mq135_Ro;
+  doc["gas_ratio"] = sensorData.gasRatio;
+  doc["gas_ppm"]   = sensorData.gasPPM;
 
   doc["pir_presence"]     = sensorData.pirPresence;
   doc["pir_duration_sec"] = sensorData.pirDurationSec;
@@ -1047,9 +1118,9 @@ void handleRoot() {
     </div>
 
     <div class="card">
-      <h2>Gas (MQ135)</h2>
-      <div class="val"><span id="gasVal">-</span><span class="unit">index</span></div>
-      <div class="sub">Raw ADC: <span id="gasRawVal">-</span></div>
+      <h2>Gas Amonia / NH3 (MQ135)</h2>
+      <div class="val"><span id="gasVal">-</span><span class="unit">ppm</span></div>
+      <div class="sub">Rs/Ro: <span id="gasRatioVal">-</span> &middot; Raw ADC: <span id="gasRawVal">-</span></div>
     </div>
 
     <div class="card">
@@ -1101,7 +1172,8 @@ async function refreshData() {
     document.getElementById('tempVal').innerText = d.dht_ok ? d.temperature_c.toFixed(1) : 'ERR';
     document.getElementById('humVal').innerText = d.dht_ok ? d.humidity_pct.toFixed(1) : 'ERR';
 
-    document.getElementById('gasVal').innerText = d.gas_index.toFixed(2);
+    document.getElementById('gasVal').innerText = d.gas_ppm.toFixed(1);
+    document.getElementById('gasRatioVal').innerText = d.gas_ratio.toFixed(2);
     document.getElementById('gasRawVal').innerText = d.gas_raw;
 
     document.getElementById('pirVal').innerText = d.pir_presence ? 'ADA ORANG' : 'KOSONG';
