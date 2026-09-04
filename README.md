@@ -41,7 +41,8 @@ LetSens Toilet adalah alat monitoring kondisi toilet menggunakan ESP32 sebagai m
 - **WiFiManager**: konfigurasi WiFi tanpa hardcode — kalau belum ada/gagal konek WiFi, ESP32 otomatis jadi Access Point untuk setup ulang
 - **Koneksi MQTT ke HiveMQ Cloud** (TLS) — publish data sensor otomatis setiap 30 detik
 - **Timestamp tersinkron NTP** pada setiap data yang dikirim (format epoch & waktu lokal WIB)
-- **Web dashboard lokal** (di IP ESP32) menampilkan seluruh data sensor + status koneksi/pengiriman MQTT secara real-time
+- **mDNS (DNS lokal)** — dashboard bisa diakses lewat `http://letsens.local`, tidak perlu tahu/hafal IP device
+- **Web dashboard lokal** menampilkan seluruh data sensor + status koneksi/pengiriman MQTT secara real-time
 - Indikator status visual melalui 3 LED (Hijau / Kuning / Merah)
 - Tampilan status detail di layar OLED
 - Log data ke Serial Monitor untuk debugging/monitoring
@@ -84,7 +85,7 @@ LetSens Toilet adalah alat monitoring kondisi toilet menggunakan ESP32 sebagai m
    [OLED]  [3x LED]  [WiFiManager]
               |             |
        [Web Server Lokal]  [WiFi Rumah/Kantor]
-                                  |
+       [+ mDNS letsens.local]    |
                                   v
                     [MQTT Broker: HiveMQ Cloud (TLS)]
                                   |
@@ -99,13 +100,14 @@ LetSens Toilet adalah alat monitoring kondisi toilet menggunakan ESP32 sebagai m
 1. **Startup** — ESP32 menginisialisasi OLED, LED, dan mencoba konek ke WiFi tersimpan lewat WiFiManager.
 2. **WiFi belum ada/gagal konek** — ESP32 otomatis membuka Access Point (`LETSENS-Setup`) untuk konfigurasi WiFi lewat portal browser (lihat [Konfigurasi WiFi](#konfigurasi-wifi-wifimanager)).
 3. **Sinkronisasi waktu (NTP)** — setelah WiFi terhubung, ESP32 sinkronisasi jam lewat NTP (zona WIB) untuk timestamp data.
-4. **Koneksi MQTT** — ESP32 connect ke HiveMQ Cloud broker via TLS, mempublikasikan status `online` (dengan Last Will `offline` kalau device terputus tiba-tiba).
-5. **Web server lokal aktif** — dashboard bisa diakses dari IP lokal ESP32 di jaringan yang sama.
-6. **Warm-up MQ135** — sensor gas dipanaskan selama 60 detik agar pembacaan stabil (wajib untuk sensor jenis MQ).
-7. **Kalibrasi baseline** — sistem mengambil 100 sampel pembacaan MQ135 untuk menentukan nilai baseline udara normal di lokasi pemasangan.
-8. **Monitoring loop** — setiap 2 detik, sistem membaca seluruh sensor (real & dummy), menentukan status (`NORMAL`/`WARNING`/`CRITICAL`/`ERROR`), lalu update OLED, LED, dan web dashboard.
+4. **Aktivasi mDNS** — setelah WiFi terhubung, ESP32 mendaftarkan hostname `letsens.local` di jaringan lokal, sehingga dashboard bisa diakses tanpa perlu tahu IP.
+5. **Koneksi MQTT** — ESP32 connect ke HiveMQ Cloud broker via TLS, mempublikasikan status `online` (dengan Last Will `offline` kalau device terputus tiba-tiba).
+6. **Web server lokal aktif** — dashboard bisa diakses dari `http://letsens.local` (atau IP lokal ESP32 sebagai cadangan) di jaringan yang sama.
+7. **Warm-up MQ135** — sensor gas dipanaskan selama 60 detik agar pembacaan stabil (wajib untuk sensor jenis MQ).
+8. **Kalibrasi baseline** — sistem mengambil 100 sampel pembacaan MQ135 untuk menentukan nilai baseline udara normal di lokasi pemasangan.
+9. **Monitoring loop** — setiap 2 detik, sistem membaca seluruh sensor (real & dummy), menentukan status (`NORMAL`/`WARNING`/`CRITICAL`/`ERROR`), lalu update OLED, LED, dan web dashboard.
    - `Gas Index = Nilai MQ135 saat ini / Baseline`
-9. **Publish MQTT** — setiap 30 detik, seluruh data sensor dikirim sebagai payload JSON ke topic `letsens/toilet/sensordata` (lihat [Format Data](#format-data-payload-mqtt)).
+10. **Publish MQTT** — setiap 30 detik, seluruh data sensor dikirim sebagai payload JSON ke topic `letsens/toilet/sensordata` (lihat [Format Data](#format-data-payload-mqtt)).
 
 ## Instalasi
 
@@ -118,7 +120,7 @@ LetSens Toilet adalah alat monitoring kondisi toilet menggunakan ESP32 sebagai m
    - `WiFiManager` (by tzapu)
    - `PubSubClient` (by Nick O'Leary)
    - `ArduinoJson` (by Benoit Blanchon, v6/v7)
-   - *(`WiFi.h`, `WiFiClientSecure.h`, `WebServer.h`, `time.h` sudah termasuk di ESP32 core, tidak perlu install manual)*
+   - *(`WiFi.h`, `WiFiClientSecure.h`, `WebServer.h`, `ESPmDNS.h`, `time.h` sudah termasuk di ESP32 core, tidak perlu install manual)*
 3. Hubungkan seluruh komponen sesuai [Skema Pin](#skema-pin).
 4. Buka file `firmwareletsens_v2.ino`, pilih board **ESP32 Dev Module**, lalu upload.
 5. Buka Serial Monitor (baud rate `115200`) untuk melihat log data & status koneksi.
@@ -129,9 +131,9 @@ Perangkat **tidak menyimpan SSID/password WiFi langsung di kode**. Cara setup:
 
 1. Nyalakan device. Kalau belum pernah dikonfigurasi (atau kredensial lama gagal konek), OLED akan menampilkan mode setup dan device membuka WiFi hotspot bernama **`LETSENS-Setup`** (password: `letsens123`).
 2. Dari HP/laptop, konek ke WiFi `LETSENS-Setup` tersebut.
-3. Portal konfigurasi akan otomatis terbuka (atau buka manual `192.168.4.1` di browser).
+3. Portal konfigurasi akan otomatis terbuka (captive portal). Kalau tidak muncul otomatis, buka manual `192.168.4.1` di browser — mDNS belum aktif pada tahap ini karena device belum terhubung ke jaringan WiFi utama.
 4. Pilih WiFi rumah/kantor yang ingin dipakai, masukkan passwordnya, lalu simpan.
-5. Device akan restart otomatis dan konek ke WiFi yang baru dimasukkan.
+5. Device akan restart otomatis dan konek ke WiFi yang baru dimasukkan. Setelah terhubung, dashboard langsung bisa diakses via `http://letsens.local`.
 
 **Untuk mengganti WiFi di kemudian hari**, ada dua cara:
 - Buka web dashboard lokal (lihat [Web Dashboard Lokal](#web-dashboard-lokal)) → klik tombol **"Ganti Konfigurasi WiFi"**, atau
@@ -188,19 +190,19 @@ Data dikirim sebagai JSON string ke topic `letsens/toilet/sensordata`:
 
 ## Web Dashboard Lokal
 
-Selama ESP32 terhubung ke WiFi, dashboard bisa diakses lewat browser di jaringan yang sama:
+Selama ESP32 terhubung ke WiFi, dashboard bisa diakses lewat browser di jaringan yang sama menggunakan hostname mDNS (tidak perlu tahu IP device):
 
 ```
-http://<IP-ESP32>/
+http://letsens.local/
 ```
 
-IP address bisa dilihat di Serial Monitor saat boot, atau di layar OLED sesaat setelah WiFi terhubung.
+Kalau perangkat/OS Anda tidak mendukung mDNS (beberapa versi Windows lama tanpa Bonjour service), gunakan IP address sebagai cadangan — bisa dilihat di Serial Monitor saat boot, di layar OLED sesaat setelah WiFi terhubung, atau di kartu "Koneksi WiFi" pada dashboard itu sendiri.
 
 Dashboard menampilkan:
 - Status sistem (NORMAL/WARNING/CRITICAL/ERROR)
 - Suhu, kelembapan, gas index (data real-time)
 - Status PIR & lux (dummy)
-- Info WiFi (IP, RSSI) dan waktu device
+- Info WiFi (hostname `.local`, IP, RSSI) dan waktu device
 - **Status koneksi & pengiriman MQTT** (Terhubung/Terputus, Berhasil/Gagal, pesan error terakhir)
 - Tombol reset konfigurasi WiFi
 
@@ -234,6 +236,7 @@ const float GAS_CRITICAL = 2.00;   // Ambang Gas Index untuk CRITICAL
 - [ ] Pasang sensor cahaya fisik (BH1750/LDR), ganti fungsi simulasi (`simulateLight()`) dengan pembacaan sensor asli
 - [ ] Pertimbangkan pinning root CA certificate untuk koneksi TLS ke HiveMQ (saat ini pakai `setInsecure()` untuk kemudahan development)
 - [ ] Backend/dashboard cloud untuk menyimpan & memvisualisasikan data historis (lihat diagram blok sistem)
+- [ ] Hostname mDNS unik per device (`letsens01.local`, `letsens02.local`, dst) kalau nanti dipasang lebih dari 1 unit
 
 ## Troubleshooting
 
@@ -253,6 +256,12 @@ const float GAS_CRITICAL = 2.00;   // Ambang Gas Index untuk CRITICAL
 **WiFi tidak konek / portal setup tidak muncul:**
 - Cek OLED — kalau menampilkan mode setup, konek HP/laptop ke WiFi `LETSENS-Setup` dan buka `192.168.4.1`.
 - Kalau device stuck restart terus, tahan tombol BOOT (GPIO0) saat power-on untuk menghapus kredensial WiFi lama.
+
+**`http://letsens.local` tidak bisa dibuka:**
+- Pastikan device yang dipakai untuk mengakses (HP/laptop) berada di jaringan WiFi yang **sama persis** dengan ESP32.
+- Beberapa jaringan WiFi kantor/kampus (dengan client isolation) memblokir mDNS antar perangkat — coba akses via IP sebagai alternatif.
+- Windows tanpa iTunes/Bonjour terpasang biasanya tidak mendukung mDNS secara native — install [Bonjour Print Services](https://support.apple.com/kb/DL999) atau gunakan IP address.
+- Android & iOS umumnya sudah mendukung mDNS bawaan, begitu juga macOS dan sebagian besar distro Linux.
 
 **Data tidak muncul di MQTT broker (MQTTX/HiveMQ Console):**
 - Pastikan subscribe ke topic yang benar: `letsens/toilet/sensordata` atau wildcard `letsens/toilet/#`.
