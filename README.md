@@ -3,7 +3,7 @@
 Sistem monitoring lingkungan toilet berbasis ESP32 (AIoT) — memantau suhu, kelembapan, kualitas udara, kehadiran pengguna, dan intensitas cahaya secara real-time. Data dikirim ke cloud lewat MQTT, ditampilkan lokal lewat OLED & web dashboard, dan diberi indikator status melalui LED.
 
 **Versi Produk:** 1.0
-**Versi Firmware:** 2.0
+**Versi Firmware:** 2.3
 **Dibuat oleh:** M. Ibrahim Yusuf
 
 ---
