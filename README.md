@@ -34,10 +34,10 @@ LetSens Toilet adalah alat monitoring kondisi toilet menggunakan ESP32 sebagai m
 
 ## Fitur
 
-- Pembacaan suhu & kelembapan real-time (DHT11) — **data sensor asli**
-- Deteksi kualitas udara / gas (MQ135) dengan kalibrasi baseline otomatis saat startup — **data sensor asli**
+- Pembacaan suhu & kelembapan real-time  
+- Deteksi kualitas udara / gas (MQ135) dengan kalibrasi baseline otomatis saat startup —
 - Deteksi kehadiran pengguna & durasi di toilet (PIR) — **saat ini masih data simulasi/dummy**, siap diganti sensor asli
-- Estimasi intensitas cahaya (lux) — **saat ini masih data simulasi/dummy**, siap diganti sensor asli
+- Estimasi intensitas cahaya (lux) 
 - **WiFiManager**: konfigurasi WiFi tanpa hardcode — kalau belum ada/gagal konek WiFi, ESP32 otomatis jadi Access Point untuk setup ulang
 - **Koneksi MQTT ke HiveMQ Cloud** (TLS) — publish data sensor otomatis setiap 30 detik
 - **Timestamp tersinkron NTP** pada setiap data yang dikirim (format epoch & waktu lokal WIB)
