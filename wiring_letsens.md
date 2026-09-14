@@ -3,7 +3,7 @@
 > Sumber kebenaran (source of truth): **Skematik PCB LetSens V2** (EasyEDA, update 2026‑09‑07).
 > Mikrokontroler: **ESP32-DEVKIT-V1**
 >
-> Firmware (`LetSens_Toilet_V2_4.ino`) masih akan disesuaikan agar mengikuti wiring di dokumen ini — khususnya bagian sensor suhu/kelembaban yang di kode masih memakai DHT11, sementara di PCB sudah terpasang **GY-SHT31 (I2C)**.
+> Firmware (`LetSens_Toilet_V2_6.ino`) masih akan disesuaikan agar mengikuti wiring di dokumen ini — khususnya bagian sensor suhu/kelembaban yang di kode masih memakai DHT11, sementara di PCB sudah terpasang **GY-SHT31 (I2C)**.
 
 ---
 
